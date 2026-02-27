@@ -58,6 +58,9 @@
  * Progress:
  *   progress [json|table|bar]          Render progress in various formats
  *
+ * Graph:
+ *   graph generate-dev                  Generate .planning/DEVELOPMENT_GRAPH.json
+ *
  * Todos:
  *   todo complete <filename>           Move todo from pending to completed
  *
@@ -65,6 +68,7 @@
  *   scaffold context --phase <N>       Create CONTEXT.md template
  *   scaffold uat --phase <N>           Create UAT.md template
  *   scaffold verification --phase <N>  Create VERIFICATION.md template
+ *   scaffold architecture --phase <N>  Create ARCHITECTURE.md template
  *   scaffold phase-dir --phase <N>     Create phase directory
  *     --name <name>
  *
@@ -481,6 +485,16 @@ async function main() {
     case 'progress': {
       const subcommand = args[1] || 'json';
       commands.cmdProgressRender(cwd, subcommand, raw);
+      break;
+    }
+
+    case 'graph': {
+      const subcommand = args[1];
+      if (subcommand === 'generate-dev') {
+        commands.cmdGraphGenerateDev(cwd, raw);
+      } else {
+        error('Unknown graph subcommand. Available: generate-dev');
+      }
       break;
     }
 

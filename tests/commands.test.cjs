@@ -414,6 +414,190 @@ key-decisions:
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// graph generate-dev command
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('graph generate-dev command', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempProject();
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  test('returns informative response when ROADMAP.md is missing', () => {
+    const result = runGsdTools('graph generate-dev', tmpDir);
+    assert.ok(result.success, `Command should succeed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.generated, false, 'graph should not be generated');
+    assert.strictEqual(output.error, 'ROADMAP.md not found', 'should explain missing roadmap');
+  });
+
+  test('generates DEVELOPMENT_GRAPH.json from roadmap and requirements', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap: Test App
+
+## Phases
+- [ ] **Phase 1: Foundation** - Base setup
+- [ ] **Phase 2: UI** - Build UI
+
+## Phase Details
+
+### Phase 1: Foundation
+**Goal**: Set up baseline
+**Depends on**: Nothing (first phase)
+**Requirements**: [AUTH-01, CORE-01]
+**Plans**: 2 plans
+
+Plans:
+- [ ] 01-01: Project scaffold
+- [ ] 01-02: Auth baseline
+
+### Phase 2: UI
+**Goal**: Build graph interface
+**Depends on**: Phase 1
+**Requirements**: [UI-01]
+**Plans**: 1 plan
+
+Plans:
+- [ ] 02-01: Graph canvas
+`
+    );
+
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'REQUIREMENTS.md'),
+      `# Requirements: Test App
+
+## v1 Requirements
+
+### Authentication
+- [ ] **AUTH-01**: User can sign in with email/password
+
+### Core
+- [ ] **CORE-01**: User can initialize a project
+
+### UI
+- [ ] **UI-01**: User can view roadmap graph
+
+## Traceability
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| AUTH-01 | Phase 1 | Pending |
+| CORE-01 | Phase 1 | Pending |
+| UI-01 | Phase 2 | Pending |
+`
+    );
+
+    const result = runGsdTools('graph generate-dev', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.generated, true, 'graph should be generated');
+    assert.strictEqual(output.path, '.planning/DEVELOPMENT_GRAPH.json', 'path should be returned');
+
+    const graphPath = path.join(tmpDir, '.planning', 'DEVELOPMENT_GRAPH.json');
+    assert.ok(fs.existsSync(graphPath), 'graph file should exist');
+
+    const graph = JSON.parse(fs.readFileSync(graphPath, 'utf-8'));
+    assert.strictEqual(graph.nodes.phases.length, 2, 'should include 2 phases');
+    assert.strictEqual(graph.nodes.plans.length, 3, 'should include plans from roadmap');
+    assert.strictEqual(graph.nodes.requirements.length, 3, 'should include requirements');
+    assert.ok(
+      graph.edges.some(e => e.from === 'phase:2' && e.to === 'phase:1' && e.type === 'depends_on'),
+      'phase dependency edge should exist'
+    );
+    assert.ok(
+      graph.edges.some(e => e.from === 'phase:1' && e.to === 'requirement:AUTH-01' && e.type === 'covers_requirement'),
+      'requirement edge should exist'
+    );
+    assert.ok(
+      graph.edges.some(e => e.from === 'phase:1' && e.to === 'plan:01-01' && e.type === 'contains_plan'),
+      'plan containment edge should exist'
+    );
+
+    const phaseOne = graph.nodes.phases.find(n => n.id === 'phase:1');
+    assert.ok(phaseOne.ticket, 'phase nodes should include ticket');
+    assert.ok(
+      phaseOne.ticket.description.includes('covers 2 requirements'),
+      'phase ticket should describe requirement coverage'
+    );
+    assert.ok(
+      phaseOne.ticket.project_contribution.includes('helps the project'),
+      'phase ticket should include project contribution'
+    );
+
+    const planNode = graph.nodes.plans.find(n => n.id === 'plan:01-01');
+    assert.ok(planNode.ticket, 'plan nodes should include ticket');
+    assert.ok(
+      planNode.ticket.description.includes('Project scaffold'),
+      'plan ticket should include plan name in description'
+    );
+
+    const reqNode = graph.nodes.requirements.find(n => n.id === 'requirement:AUTH-01');
+    assert.ok(reqNode.ticket, 'requirement nodes should include ticket');
+    assert.ok(
+      reqNode.ticket.project_contribution.includes('Phase 1'),
+      'requirement ticket should include mapped phase contribution'
+    );
+  });
+
+  test('graph ticket generation handles missing requirement text and missing phase goal', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap: Sparse App
+
+## Phases
+- [ ] **Phase 1: Core**
+
+## Phase Details
+
+### Phase 1: Core
+**Depends on**: Nothing
+**Requirements**: [SPARSE-01]
+**Success Criteria:**
+1. Base behavior is visible.
+`
+    );
+
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'REQUIREMENTS.md'),
+      `# Requirements: Sparse App
+
+## v1 Requirements
+
+## Traceability
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| SPARSE-01 | Phase 1 | Pending |
+`
+    );
+
+    const result = runGsdTools('graph generate-dev', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const graphPath = path.join(tmpDir, '.planning', 'DEVELOPMENT_GRAPH.json');
+    const graph = JSON.parse(fs.readFileSync(graphPath, 'utf-8'));
+
+    const phaseNode = graph.nodes.phases.find(n => n.id === 'phase:1');
+    assert.ok(
+      phaseNode.ticket.description.includes('Deliver Core'),
+      'phase ticket should fall back to phase-name-based goal description'
+    );
+
+    const reqNode = graph.nodes.requirements.find(n => n.id === 'requirement:SPARSE-01');
+    assert.ok(
+      reqNode.ticket.description.includes('Requirement details were not provided yet.'),
+      'requirement ticket should use fallback copy when requirement text is missing'
+    );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // init commands tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -634,6 +818,24 @@ describe('scaffold command', () => {
     assert.ok(content.includes('Goal-Backward Verification'), 'should have verification heading');
   });
 
+  test('scaffolds architecture file with mermaid section', () => {
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '03-api'), { recursive: true });
+
+    const result = runGsdTools('scaffold architecture --phase 3', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.created, true);
+
+    const content = fs.readFileSync(
+      path.join(tmpDir, '.planning', 'phases', '03-api', '03-ARCHITECTURE.md'),
+      'utf-8'
+    );
+    assert.ok(content.includes('Phase 3'), 'should reference phase number');
+    assert.ok(content.includes('```mermaid'), 'should include mermaid starter block');
+    assert.ok(content.includes('Decisions Locked Before Planning'), 'should include planning gate section');
+  });
+
   test('scaffolds phase directory', () => {
     const result = runGsdTools('scaffold phase-dir --phase 5 --name User Dashboard', tmpDir);
     assert.ok(result.success, `Command failed: ${result.error}`);
@@ -657,5 +859,11 @@ describe('scaffold command', () => {
     const output = JSON.parse(result.output);
     assert.strictEqual(output.created, false, 'should not overwrite');
     assert.strictEqual(output.reason, 'already_exists');
+  });
+
+  test('scaffold architecture fails when phase directory is missing', () => {
+    const result = runGsdTools('scaffold architecture --phase 9', tmpDir);
+    assert.ok(!result.success, 'should fail');
+    assert.ok(result.error.includes('directory not found'), 'error should mention missing directory');
   });
 });

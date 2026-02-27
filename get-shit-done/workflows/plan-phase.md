@@ -266,6 +266,35 @@ UAT_PATH=$(echo "$INIT" | jq -r '.uat_path // empty')
 CONTEXT_PATH=$(echo "$INIT" | jq -r '.context_path // empty')
 ```
 
+## 7.5. Architecture Gate (Mandatory)
+
+Create a phase architecture artifact before planning. This is a hard gate.
+
+```bash
+ARCHITECTURE_PATH="${PHASE_DIR}/${PADDED_PHASE}-ARCHITECTURE.md"
+if [ ! -f "$ARCHITECTURE_PATH" ]; then
+  node ~/.claude/get-shit-done/bin/gsd-tools.cjs scaffold architecture --phase "${PHASE}"
+fi
+```
+
+If architecture file was just created, display:
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ GSD ► ARCHITECTURE GATE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Created: {ARCHITECTURE_PATH}
+
+Planning is paused. Fill the architecture doc (include Mermaid flow/sequence if useful),
+then rerun:
+/gsd:plan-phase {X}
+```
+
+Exit workflow after this message.
+
+If architecture file already exists, continue.
+
 ## 8. Spawn gsd-planner Agent
 
 Display banner:
@@ -290,6 +319,7 @@ Planner prompt:
 - {requirements_path} (Requirements)
 - {context_path} (USER DECISIONS from /gsd:discuss-phase)
 - {research_path} (Technical Research)
+- {phase_dir}/{phase_num}-ARCHITECTURE.md (Architecture gate artifact)
 - {verification_path} (Verification Gaps - if --gaps)
 - {uat_path} (UAT Gaps - if --gaps)
 </files_to_read>
@@ -357,6 +387,7 @@ Checker prompt:
 - {requirements_path} (Requirements)
 - {context_path} (USER DECISIONS from /gsd:discuss-phase)
 - {research_path} (Technical Research — includes Validation Architecture)
+- {phase_dir}/{phase_num}-ARCHITECTURE.md (Architecture gate artifact)
 </files_to_read>
 
 **Phase requirement IDs (MUST ALL be covered):** {phase_req_ids}
@@ -557,6 +588,7 @@ Verification: {Passed | Passed with override | Skipped}
 - [ ] Phase validated against roadmap
 - [ ] Phase directory created if needed
 - [ ] CONTEXT.md loaded early (step 4) and passed to ALL agents
+- [ ] Phase architecture doc exists (created or pre-existing) before planner spawn
 - [ ] Research completed (unless --skip-research or --gaps or exists)
 - [ ] gsd-phase-researcher spawned with CONTEXT.md
 - [ ] Existing plans checked

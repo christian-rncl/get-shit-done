@@ -322,6 +322,395 @@ function cmdSummaryExtract(cwd, summaryPath, fields, raw) {
   output(fullResult, raw);
 }
 
+function parseRequirementIds(text) {
+  if (!text) return [];
+  const matches = text.match(/[A-Z][A-Z0-9]*-\d+/g) || [];
+  return [...new Set(matches)];
+}
+
+function parseRoadmapGraphData(content) {
+  const checklistStatus = new Map();
+  const checklistPattern = /-\s*\[([ x])\]\s*\*\*Phase\s+(\d+[A-Z]?(?:\.\d+)*)/gi;
+  let checklistMatch;
+  while ((checklistMatch = checklistPattern.exec(content)) !== null) {
+    checklistStatus.set(checklistMatch[2], checklistMatch[1].toLowerCase() === 'x' ? 'complete' : 'pending');
+  }
+
+  const phaseSections = [];
+  const phasePattern = /#{2,4}\s*Phase\s+(\d+[A-Z]?(?:\.\d+)*)\s*:\s*([^\n]+)\n([\s\S]*?)(?=\n#{2,4}\s*Phase\s+\d+[A-Z]?(?:\.\d+)*\s*:|\n##\s+Progress\b|$)/gi;
+  let phaseMatch;
+
+  while ((phaseMatch = phasePattern.exec(content)) !== null) {
+    const number = phaseMatch[1];
+    const name = phaseMatch[2].replace(/\(INSERTED\)/gi, '').trim();
+    const section = phaseMatch[3];
+
+    const goalMatch = section.match(/\*\*Goal\*\*:\s*([^\n]+)/i) || section.match(/\*\*Goal:\*\*\s*([^\n]+)/i);
+    const dependsMatch = section.match(/\*\*Depends on\*\*:\s*([^\n]+)/i) || section.match(/\*\*Depends on:\*\*\s*([^\n]+)/i);
+    const requirementsMatch = section.match(/\*\*Requirements\*\*:\s*([^\n]+)/i) || section.match(/\*\*Requirements:\*\*\s*([^\n]+)/i);
+    const successCriteriaMatch = section.match(/\*\*Success Criteria\*\*:\s*\n([\s\S]*?)(?=\n\*\*|\nPlans:|$)/i);
+
+    const dependsOn = [];
+    const depRegex = /Phase\s+(\d+[A-Z]?(?:\.\d+)*)/gi;
+    let depMatch;
+    const dependsText = dependsMatch ? dependsMatch[1] : '';
+    while ((depMatch = depRegex.exec(dependsText)) !== null) {
+      dependsOn.push(depMatch[1]);
+    }
+
+    const plans = [];
+    const plansRegex = /-\s*\[([ x])\]\s*([0-9]+(?:\.[0-9]+)?-\d+):\s*([^\n]+)/g;
+    let planMatch;
+    while ((planMatch = plansRegex.exec(section)) !== null) {
+      plans.push({
+        id: planMatch[2],
+        name: planMatch[3].trim(),
+        status: planMatch[1].toLowerCase() === 'x' ? 'complete' : 'pending',
+      });
+    }
+
+    const success_criteria = [];
+    const criteriaBlock = successCriteriaMatch ? successCriteriaMatch[1] : '';
+    const criteriaRegex = /(?:^|\n)\s*(?:\d+\.|-)\s+([^\n]+)/g;
+    let criteriaMatch;
+    while ((criteriaMatch = criteriaRegex.exec(criteriaBlock)) !== null) {
+      success_criteria.push(criteriaMatch[1].trim());
+    }
+
+    phaseSections.push({
+      number,
+      name,
+      goal: goalMatch ? goalMatch[1].trim() : null,
+      success_criteria,
+      depends_on: dependsOn,
+      requirements: parseRequirementIds(requirementsMatch ? requirementsMatch[1] : ''),
+      plans,
+      status: checklistStatus.get(number) || 'pending',
+    });
+  }
+
+  return phaseSections;
+}
+
+function firstSentence(text) {
+  if (!text || typeof text !== 'string') {
+    return '';
+  }
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function ensurePeriod(text) {
+  const cleaned = firstSentence(text);
+  if (!cleaned) {
+    return '';
+  }
+  return /[.!?]$/.test(cleaned) ? cleaned : `${cleaned}.`;
+}
+
+function defaultPhaseDescription(phase) {
+  const goal = ensurePeriod(phase.goal || `Deliver ${phase.name}`);
+  const reqCount = Array.isArray(phase.requirements) ? phase.requirements.length : 0;
+  const criteriaCount = Array.isArray(phase.success_criteria) ? phase.success_criteria.length : 0;
+  return `${goal} This phase covers ${reqCount} requirement${reqCount === 1 ? '' : 's'} and has ${criteriaCount} success check${criteriaCount === 1 ? '' : 's'} so progress is measurable.`;
+}
+
+function phaseContribution(phase) {
+  const depCount = Array.isArray(phase.depends_on) ? phase.depends_on.length : 0;
+  if (depCount > 0) {
+    return `This phase helps the project by building on ${depCount} earlier phase${depCount === 1 ? '' : 's'} and turning that foundation into user-visible progress.`;
+  }
+  return 'This phase helps the project by creating the base foundation that later phases depend on.';
+}
+
+function planDescription(plan, phase) {
+  const planName = plan && plan.name ? plan.name : 'unnamed plan work';
+  const phaseName = phase && phase.name ? phase.name : 'current phase';
+  const phaseGoal = phase && phase.goal ? ensurePeriod(phase.goal) : '';
+  return `This plan implements "${planName}" for ${phaseName}. ${phaseGoal}`.trim();
+}
+
+function planContribution(phase) {
+  const phaseName = phase && phase.name ? phase.name : 'its phase';
+  return `This plan helps the project by moving ${phaseName} from design into working implementation that can be tested and shipped.`;
+}
+
+function requirementDescription(req) {
+  const requirementText = ensurePeriod(req && req.text ? req.text : 'Requirement details were not provided yet.');
+  const category = req && req.category ? req.category : 'General';
+  return `${requirementText} This requirement is tracked under ${category} so planning and verification stay aligned.`;
+}
+
+function requirementContribution(req, mappedPhase) {
+  if (mappedPhase) {
+    return `This requirement helps the project by defining user value that Phase ${mappedPhase} must deliver before release.`;
+  }
+  return 'This requirement helps the project by defining expected user value and keeping scope clear.';
+}
+
+function makeTicket({ summary, description, projectContribution, acceptanceCriteria, links, notes }) {
+  return {
+    summary: firstSentence(summary),
+    description: firstSentence(description),
+    priority: '',
+    assignee: '',
+    acceptance_criteria: Array.isArray(acceptanceCriteria) ? acceptanceCriteria.map(firstSentence).filter(Boolean) : [],
+    links: Array.isArray(links) ? links.map(firstSentence).filter(Boolean) : [],
+    notes: firstSentence(notes || ''),
+    project_contribution: firstSentence(projectContribution),
+  };
+}
+
+function parseRequirementsGraphData(content) {
+  const requirements = new Map();
+  const phaseMapping = new Map();
+
+  let currentCategory = null;
+  let inV1 = false;
+  const lines = content.split('\n');
+
+  for (const line of lines) {
+    if (/^##\s+v1 Requirements/i.test(line)) {
+      inV1 = true;
+      continue;
+    }
+    if (/^##\s+v2 Requirements/i.test(line) || /^##\s+Out of Scope/i.test(line) || /^##\s+Traceability/i.test(line)) {
+      inV1 = false;
+    }
+    const categoryMatch = line.match(/^###\s+(.+)/);
+    if (categoryMatch) {
+      currentCategory = categoryMatch[1].trim();
+      continue;
+    }
+    if (!inV1) continue;
+
+    const reqMatch = line.match(/^\s*-\s*(?:\[[ x]\]\s*)?\*\*([A-Z][A-Z0-9]*-\d+)\*\*:\s*(.+)\s*$/);
+    if (!reqMatch) continue;
+
+    requirements.set(reqMatch[1], {
+      id: reqMatch[1],
+      text: reqMatch[2].trim(),
+      category: currentCategory,
+      status: 'pending',
+    });
+  }
+
+  const traceabilityRowRegex = /^\|\s*([A-Z][A-Z0-9]*-\d+)\s*\|\s*Phase\s+([0-9]+(?:\.[0-9]+)?)\s*\|\s*([^|]+)\|/i;
+  for (const line of lines) {
+    const rowMatch = line.match(traceabilityRowRegex);
+    if (!rowMatch) continue;
+    const reqId = rowMatch[1];
+    const phaseNumber = rowMatch[2];
+    const status = rowMatch[3].trim().toLowerCase().replace(/\s+/g, '_');
+
+    phaseMapping.set(reqId, phaseNumber);
+    if (requirements.has(reqId)) {
+      requirements.get(reqId).status = status;
+    } else {
+      requirements.set(reqId, {
+        id: reqId,
+        text: null,
+        category: null,
+        status,
+      });
+    }
+  }
+
+  return { requirements, phaseMapping };
+}
+
+function cmdGraphGenerateDev(cwd, raw) {
+  const roadmapPath = path.join(cwd, '.planning', 'ROADMAP.md');
+  const requirementsPath = path.join(cwd, '.planning', 'REQUIREMENTS.md');
+  const projectPath = path.join(cwd, '.planning', 'PROJECT.md');
+  const graphPath = path.join(cwd, '.planning', 'DEVELOPMENT_GRAPH.json');
+
+  if (!fs.existsSync(roadmapPath)) {
+    output({ generated: false, error: 'ROADMAP.md not found' }, raw, 'no roadmap');
+    return;
+  }
+
+  const roadmapContent = fs.readFileSync(roadmapPath, 'utf-8');
+  const phases = parseRoadmapGraphData(roadmapContent);
+
+  const requirementsContent = fs.existsSync(requirementsPath)
+    ? fs.readFileSync(requirementsPath, 'utf-8')
+    : '';
+  const { requirements, phaseMapping } = parseRequirementsGraphData(requirementsContent);
+
+  const phaseNodes = [];
+  const planNodes = [];
+  const requirementNodes = [];
+  const edges = [];
+  const phaseNodeIds = new Set();
+  const planNodeIds = new Set();
+
+  for (const phase of phases) {
+    const phaseNodeId = `phase:${phase.number}`;
+    phaseNodeIds.add(phaseNodeId);
+
+    const phaseInfo = findPhaseInternal(cwd, phase.number);
+    const planFileCount = phaseInfo ? phaseInfo.plans.length : 0;
+    const summaryFileCount = phaseInfo ? phaseInfo.summaries.length : 0;
+
+    phaseNodes.push({
+      id: phaseNodeId,
+      number: phase.number,
+      name: phase.name,
+      goal: phase.goal,
+      success_criteria: phase.success_criteria,
+      status: phase.status,
+      ticket: makeTicket({
+        summary: `Phase ${phase.number}: ${phase.name}`,
+        description: defaultPhaseDescription(phase),
+        projectContribution: phaseContribution(phase),
+        acceptanceCriteria: phase.success_criteria,
+      }),
+      file_status: {
+        plan_files: planFileCount,
+        summary_files: summaryFileCount,
+      },
+    });
+
+    for (const dep of phase.depends_on) {
+      edges.push({
+        from: phaseNodeId,
+        to: `phase:${dep}`,
+        type: 'depends_on',
+      });
+    }
+
+    for (const reqId of phase.requirements) {
+      edges.push({
+        from: phaseNodeId,
+        to: `requirement:${reqId}`,
+        type: 'covers_requirement',
+      });
+      if (!requirements.has(reqId)) {
+        requirements.set(reqId, {
+          id: reqId,
+          text: null,
+          category: null,
+          status: 'pending',
+        });
+      }
+    }
+
+    for (const plan of phase.plans) {
+      const planNodeId = `plan:${plan.id}`;
+      if (!planNodeIds.has(planNodeId)) {
+        planNodeIds.add(planNodeId);
+        planNodes.push({
+          id: planNodeId,
+          plan_id: plan.id,
+          name: plan.name,
+          status: plan.status,
+          phase: phase.number,
+          ticket: makeTicket({
+            summary: `${plan.id}: ${plan.name}`,
+            description: planDescription(plan, phase),
+            projectContribution: planContribution(phase),
+            acceptanceCriteria: [
+              `Plan ${plan.id} tasks are completed and behavior is verified.`,
+              `Results are documented so the team can track delivery.`,
+            ],
+          }),
+        });
+      }
+      edges.push({
+        from: phaseNodeId,
+        to: planNodeId,
+        type: 'contains_plan',
+      });
+    }
+  }
+
+  for (const req of requirements.values()) {
+    requirementNodes.push({
+      id: `requirement:${req.id}`,
+      req_id: req.id,
+      text: req.text,
+      category: req.category,
+      status: req.status,
+      ticket: makeTicket({
+        summary: `${req.id}: ${req.text || 'Requirement'}`,
+        description: requirementDescription(req),
+        projectContribution: requirementContribution(req, phaseMapping.get(req.id)),
+        acceptanceCriteria: [
+          req.text || `${req.id} behavior is clearly defined and testable.`,
+          'Requirement has explicit phase traceability in ROADMAP and REQUIREMENTS.',
+        ],
+      }),
+    });
+
+    const mappedPhase = phaseMapping.get(req.id);
+    if (mappedPhase) {
+      const from = `phase:${mappedPhase}`;
+      const to = `requirement:${req.id}`;
+      const alreadyExists = edges.some(e => e.from === from && e.to === to && e.type === 'covers_requirement');
+      if (!alreadyExists) {
+        edges.push({
+          from,
+          to,
+          type: 'covers_requirement',
+        });
+      }
+    }
+  }
+
+  let projectName = null;
+  if (fs.existsSync(projectPath)) {
+    const projectContent = fs.readFileSync(projectPath, 'utf-8');
+    const headingMatch = projectContent.match(/^#\s+(.+)/m);
+    projectName = headingMatch ? headingMatch[1].trim() : null;
+  }
+
+  fs.mkdirSync(path.dirname(graphPath), { recursive: true });
+
+  const graph = {
+    schema_version: '1.0.0',
+    generated_at: new Date().toISOString(),
+    project: {
+      name: projectName,
+      root: '.planning',
+      sources: [
+        '.planning/PROJECT.md',
+        '.planning/REQUIREMENTS.md',
+        '.planning/ROADMAP.md',
+        '.planning/phases/',
+      ],
+    },
+    nodes: {
+      phases: phaseNodes,
+      plans: planNodes,
+      requirements: requirementNodes.sort((a, b) => a.req_id.localeCompare(b.req_id)),
+      tasks: [],
+      commits: [],
+    },
+    edges,
+    stats: {
+      phases: phaseNodes.length,
+      plans: planNodes.length,
+      requirements: requirementNodes.length,
+      tasks: 0,
+      commits: 0,
+      dependency_edges: edges.filter(e => e.type === 'depends_on').length,
+      requirement_edges: edges.filter(e => e.type === 'covers_requirement').length,
+      containment_edges: edges.filter(e => e.type === 'contains_plan').length,
+    },
+  };
+
+  fs.writeFileSync(graphPath, `${JSON.stringify(graph, null, 2)}\n`, 'utf-8');
+
+  output({
+    generated: true,
+    path: '.planning/DEVELOPMENT_GRAPH.json',
+    phase_count: graph.stats.phases,
+    plan_count: graph.stats.plans,
+    requirement_count: graph.stats.requirements,
+    edge_count: edges.length,
+  }, raw, '.planning/DEVELOPMENT_GRAPH.json');
+}
+
 async function cmdWebsearch(query, options, raw) {
   const apiKey = process.env.BRAVE_API_KEY;
 
@@ -510,6 +899,11 @@ function cmdScaffold(cwd, type, options, raw) {
       content = `---\nphase: "${padded}"\nname: "${name || phaseInfo?.phase_name || 'Unnamed'}"\ncreated: ${today}\nstatus: pending\n---\n\n# Phase ${phase}: ${name || phaseInfo?.phase_name || 'Unnamed'} — Verification\n\n## Goal-Backward Verification\n\n**Phase Goal:** [From ROADMAP.md]\n\n## Checks\n\n| # | Requirement | Status | Evidence |\n|---|------------|--------|----------|\n\n## Result\n\n_Pending verification_\n`;
       break;
     }
+    case 'architecture': {
+      filePath = path.join(phaseDir, `${padded}-ARCHITECTURE.md`);
+      content = `---\nphase: "${padded}"\nname: "${name || phaseInfo?.phase_name || 'Unnamed'}"\ncreated: ${today}\nstatus: draft\n---\n\n# Phase ${phase}: ${name || phaseInfo?.phase_name || 'Unnamed'} — Architecture\n\n## Overview\n\n[Describe the architecture approach for this phase and the boundaries of work.]\n\n## Components\n\n- [Component A] — [Responsibility]\n- [Component B] — [Responsibility]\n\n## Data Flow\n\n\`\`\`mermaid\nflowchart TD\n  User[User Action] --> Entry[Entry Point]\n  Entry --> Service[Core Service]\n  Service --> Storage[(State / Storage)]\n  Service --> Output[Visible Outcome]\n\`\`\`\n\n## Decisions Locked Before Planning\n\n- [Decision 1]\n- [Decision 2]\n\n## Risks / Unknowns\n\n- [Risk]\n- [Unknown]\n\n## Verification Notes\n\n- [How this architecture will be validated during execution]\n`;
+      break;
+    }
     case 'phase-dir': {
       if (!phase || !name) {
         error('phase and name required for phase-dir scaffold');
@@ -524,7 +918,7 @@ function cmdScaffold(cwd, type, options, raw) {
       return;
     }
     default:
-      error(`Unknown scaffold type: ${type}. Available: context, uat, verification, phase-dir`);
+      error(`Unknown scaffold type: ${type}. Available: context, uat, verification, architecture, phase-dir`);
   }
 
   if (fs.existsSync(filePath)) {
@@ -546,6 +940,7 @@ module.exports = {
   cmdResolveModel,
   cmdCommit,
   cmdSummaryExtract,
+  cmdGraphGenerateDev,
   cmdWebsearch,
   cmdProgressRender,
   cmdTodoComplete,
